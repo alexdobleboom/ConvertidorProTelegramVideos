@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+ffmpeg-python 
+psutil
+python-dotenv
+aiofiles
