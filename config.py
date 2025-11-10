@@ -13,18 +13,18 @@ class Config:
     ADMINISTRADORES = [int(admin_id.strip()) for admin_id in os.getenv("ADMINISTRADORES", "123456789").split(",")]
     
     # Configuración de Comportamiento del Bot
-    MAX_CONCURRENT_PROCESSES = int(os.getenv("MAX_CONCURRENT_PROCESSES", 3))
-    MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 300))
+    MAX_CONCURRENT_PROCESSES = int(os.getenv("MAX_CONCURRENT_PROCESSES", 8))
+    MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 2000))
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 300))
     
     # Configuración de Calidad por Defecto
     DEFAULT_QUALITY = {
-        "resolution": os.getenv("DEFAULT_RESOLUTION", "1280x720"),
-        "crf": os.getenv("DEFAULT_CRF", "23"),
-        "audio_bitrate": os.getenv("DEFAULT_AUDIO_BITRATE", "128k"),
-        "fps": os.getenv("DEFAULT_FPS", "30"),
-        "preset": os.getenv("DEFAULT_PRESET", "medium"),
-        "codec": os.getenv("DEFAULT_CODEC", "libx264")
+        "resolution": os.getenv("DEFAULT_RESOLUTION", "640x480"),
+        "crf": os.getenv("DEFAULT_CRF", "18"),
+        "audio_bitrate": os.getenv("DEFAULT_AUDIO_BITRATE", "60k"),
+        "fps": os.getenv("DEFAULT_FPS", "32"),
+        "preset": os.getenv("DEFAULT_PRESET", "veryfast"),
+        "codec": os.getenv("DEFAULT_CODEC", "libx265")
     }
     
     # Rutas del Sistema
