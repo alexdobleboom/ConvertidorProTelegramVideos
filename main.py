@@ -26,8 +26,8 @@ class Config:
     API_HASH = os.getenv("API_HASH", "tu_api_hash_aqui")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "tu_bot_token_aqui")
     
-    # Configuración de Administradores
-    ADMINISTRADORES = [int(admin_id.strip()) for admin_id in os.getenv("ADMINISTRADORES", "123456789").split(",")]
+    # Configuración de Programadores
+    PROGRAMADORES = [int(programador_id.strip()) for programador_id in os.getenv("PROGRAMADORES", "123456789").split(",")]
     
     # Configuración de Comportamiento del Bot
     MAX_CONCURRENT_PROCESSES = int(os.getenv("MAX_CONCURRENT_PROCESSES", 3))
@@ -56,9 +56,6 @@ class Config:
         
         if variables_faltantes:
             raise ValueError(f"Faltan variables de entorno requeridas: {', '.join(variables_faltantes)}")
-        
-        if not cls.ADMINISTRADORES:
-            raise ValueError("Debe especificar al menos un ID de administrador en ADMINISTRADORES")
         
         return True
 
@@ -102,17 +99,6 @@ class DatabaseManager:
                 )
             ''')
             
-            # Tabla de administradores
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS administradores (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    nivel_permisos INTEGER DEFAULT 1,
-                    fecha_agregado DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
             # Tabla de videos convertidos
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS videos_convertidos (
@@ -132,18 +118,6 @@ class DatabaseManager:
                 )
             ''')
             
-            # Tabla de grupos autorizados
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS grupos_autorizados (
-                    chat_id INTEGER PRIMARY KEY,
-                    titulo_grupo TEXT,
-                    total_miembros INTEGER,
-                    fecha_agregado DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    fecha_ultimo_uso DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    es_activo BOOLEAN DEFAULT 1
-                )
-            ''')
-            
             # Tabla de configuración del sistema
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS configuracion_sistema (
@@ -154,7 +128,9 @@ class DatabaseManager:
                 )
             ''')
             
-            # Insertar configuración por defecto
+            conn.commit()
+            
+            # Insertar configuración por defecto si no existe
             configuracion_por_defecto = [
                 ('limite_peso_mb', str(Config.MAX_FILE_SIZE_MB), 'Límite máximo de tamaño de archivo en MB'),
                 ('max_concurrente', str(Config.MAX_CONCURRENT_PROCESSES), 'Máximo de procesos concurrentes'),
@@ -162,17 +138,11 @@ class DatabaseManager:
                 ('mantenimiento', 'false', 'Modo mantenimiento del bot')
             ]
             
-            cursor.executemany('''
-                INSERT OR IGNORE INTO configuracion_sistema (clave, valor, descripcion)
-                VALUES (?, ?, ?)
-            ''', configuracion_por_defecto)
-            
-            # Insertar administradores por defecto
-            for admin_id in Config.ADMINISTRADORES:
+            for clave, valor, descripcion in configuracion_por_defecto:
                 cursor.execute('''
-                    INSERT OR IGNORE INTO administradores (user_id, username, first_name)
+                    INSERT OR IGNORE INTO configuracion_sistema (clave, valor, descripcion)
                     VALUES (?, ?, ?)
-                ''', (admin_id, "Administrador", "Admin"))
+                ''', (clave, valor, descripcion))
             
             conn.commit()
             logger.info("✅ Base de datos inicializada correctamente")
@@ -180,6 +150,31 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error inicializando base de datos: {e}")
             raise
+        finally:
+            conn.close()
+    
+    def cargar_configuracion_desde_db(self):
+        """Carga la configuración desde la base de datos"""
+        try:
+            conn = self.obtener_conexion()
+            cursor = conn.cursor()
+            
+            # Cargar límite de peso
+            cursor.execute('SELECT valor FROM configuracion_sistema WHERE clave = ?', ('limite_peso_mb',))
+            resultado = cursor.fetchone()
+            if resultado:
+                Config.MAX_FILE_SIZE_MB = int(resultado['valor'])
+            
+            # Cargar calidad por defecto
+            cursor.execute('SELECT valor FROM configuracion_sistema WHERE clave = ?', ('calidad_default',))
+            resultado = cursor.fetchone()
+            if resultado:
+                Config.DEFAULT_QUALITY = json.loads(resultado['valor'])
+            
+            logger.info("✅ Configuración cargada desde base de datos")
+            
+        except Exception as e:
+            logger.error(f"❌ Error cargando configuración: {e}")
         finally:
             conn.close()
     
@@ -243,22 +238,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error obteniendo usuario: {e}")
             return None
-        finally:
-            conn.close()
-    
-    def obtener_usuarios_activos(self):
-        """Obtiene todos los usuarios activos"""
-        try:
-            conn = self.obtener_conexion()
-            cursor = conn.cursor()
-            
-            cursor.execute('SELECT user_id FROM usuarios WHERE es_activo = 1')
-            usuarios = [row['user_id'] for row in cursor.fetchall()]
-            
-            return set(usuarios)
-        except Exception as e:
-            logger.error(f"❌ Error obteniendo usuarios activos: {e}")
-            return set()
         finally:
             conn.close()
     
@@ -326,26 +305,6 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def agregar_actualizar_grupo(self, chat_id, titulo_grupo, total_miembros=0):
-        """Agrega o actualiza un grupo en la base de datos"""
-        try:
-            conn = self.obtener_conexion()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO grupos_autorizados 
-                (chat_id, titulo_grupo, total_miembros, fecha_ultimo_uso)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (chat_id, titulo_grupo, total_miembros))
-            
-            conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error agregando grupo: {e}")
-            return False
-        finally:
-            conn.close()
-    
     def obtener_estadisticas_generales(self):
         """Obtiene estadísticas generales del bot"""
         try:
@@ -358,9 +317,6 @@ class DatabaseManager:
             cursor.execute('SELECT COUNT(*) FROM videos_convertidos')
             total_videos = cursor.fetchone()[0]
             
-            cursor.execute('SELECT COUNT(*) FROM grupos_autorizados WHERE es_activo = 1')
-            total_grupos = cursor.fetchone()[0]
-            
             cursor.execute('''
                 SELECT SUM(tamano_original - tamano_convertido) 
                 FROM videos_convertidos 
@@ -371,22 +327,11 @@ class DatabaseManager:
             cursor.execute('SELECT SUM(tiempo_procesamiento) FROM videos_convertidos')
             tiempo_total = cursor.fetchone()[0] or 0
             
-            cursor.execute('''
-                SELECT first_name, total_conversiones 
-                FROM usuarios 
-                WHERE es_activo = 1 
-                ORDER BY total_conversiones DESC 
-                LIMIT 5
-            ''')
-            top_usuarios = [dict(row) for row in cursor.fetchall()]
-            
             return {
                 "total_usuarios": total_usuarios,
                 "total_videos": total_videos,
-                "total_grupos": total_grupos,
                 "espacio_ahorrado": espacio_ahorrado,
-                "tiempo_total_procesamiento": tiempo_total,
-                "top_usuarios": top_usuarios
+                "tiempo_total_procesamiento": tiempo_total
             }
         except Exception as e:
             logger.error(f"❌ Error obteniendo estadísticas: {e}")
@@ -423,6 +368,13 @@ class DatabaseManager:
             ''', (valor, clave))
             
             conn.commit()
+            
+            # Actualizar configuración en memoria
+            if clave == 'limite_peso_mb':
+                Config.MAX_FILE_SIZE_MB = int(valor)
+            elif clave == 'calidad_default':
+                Config.DEFAULT_QUALITY = json.loads(valor)
+            
             return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"❌ Error actualizando configuración: {e}")
@@ -574,18 +526,9 @@ def calcular_reduccion(tamano_original, tamano_convertido):
     else:
         return "⚖️ **Sin cambios**"
 
-def tiene_acceso(user_id, tipo_chat=None):
-    """Verifica si el usuario tiene acceso al bot"""
-    if user_id in Config.ADMINISTRADORES:
-        return True
-    
-    # Si es un grupo, todos los usuarios tienen acceso
-    if tipo_chat in ["group", "supergroup"]:
-        return True
-    
-    # Para chats privados, verificar en la base de datos
-    usuarios_activos = db.obtener_usuarios_activos()
-    return user_id in usuarios_activos
+def es_programador(user_id):
+    """Verifica si el usuario es programador"""
+    return user_id in Config.PROGRAMADORES
 
 def generar_thumbnail(ruta_video, ruta_salida, tiempo='00:00:05'):
     """Genera un thumbnail del video"""
@@ -788,7 +731,7 @@ async def procesar_video(cliente, mensaje, ruta_video, ruta_convertido, user_id)
                 "💡 **Soluciones:**\n"
                 "• Verifica el formato del archivo\n"
                 "• Intenta con un video más pequeño\n"
-                "• Usa `/soporte` para ayuda"
+                "• Usa `/help` para ayuda"
             )
             sistema_colas.trabajo_completado(user_id, False, tiempo_procesamiento)
             return
@@ -858,7 +801,7 @@ async def procesar_video(cliente, mensaje, ruta_video, ruta_convertido, user_id)
         mensaje_error = (
             "❌ **Error en Procesamiento**\n\n"
             f"**Detalles:** `{str(e)}`\n\n"
-            "🆘 **Usa** `/soporte` **para reportar**"
+            "🆘 **Usa** `/help` **para ayuda**"
         )
         try:
             if mensaje_estado:
@@ -876,10 +819,9 @@ async def procesar_video(cliente, mensaje, ruta_video, ruta_convertido, user_id)
                 pass
 
 # ==================== DECORADORES ====================
-def verificar_acceso(func):
+def registrar_usuario(func):
     async def wrapper(cliente, mensaje):
         user_id = mensaje.from_user.id
-        tipo_chat = mensaje.chat.type
         
         db.agregar_actualizar_usuario({
             'user_id': user_id,
@@ -889,45 +831,12 @@ def verificar_acceso(func):
             'language_code': mensaje.from_user.language_code
         })
         
-        if tipo_chat in ["group", "supergroup"]:
-            db.agregar_actualizar_grupo(
-                mensaje.chat.id,
-                mensaje.chat.title,
-                getattr(mensaje.chat, 'members_count', 0)
-            )
-        
-        if not tiene_acceso(user_id, tipo_chat):
-            await mensaje.reply_text(
-                "🚫 **Acceso Restringido**\n\n"
-                "📞 **Contacta al administrador**\n"
-                "para solicitar acceso al bot."
-            )
-            return
-        
-        if tipo_chat in ["group", "supergroup"]:
-            try:
-                miembro_bot = await mensaje.chat.get_member(cliente.me.id)
-                if not miembro_bot.status in ["administrator", "creator"]:
-                    await mensaje.reply_text(
-                        "🤖 **Se requieren privilegios de administrador**\n\n"
-                        "Para usar el bot en grupos, debo ser administrador.\n"
-                        "Por favor, otórgame permisos de administrador."
-                    )
-                    return
-            except Exception as e:
-                logger.error(f"Error verificando permisos de administrador: {e}")
-                await mensaje.reply_text(
-                    "❌ **Error verificando permisos**\n\n"
-                    "No pude verificar mis permisos en este grupo."
-                )
-                return
-        
         return await func(cliente, mensaje)
     return wrapper
 
 # ==================== MANEJADOR DE VIDEOS ====================
 @app.on_message(filters.video | filters.document)
-@verificar_acceso
+@registrar_usuario
 async def manejar_video(cliente: Client, mensaje: Message):
     user_id = mensaje.from_user.id
     
@@ -1002,7 +911,7 @@ async def manejar_video(cliente: Client, mensaje: Message):
         await mensaje.reply_text(
             "❌ **Error al Procesar**\n\n"
             f"**Detalles:** `{str(e)}`\n\n"
-            "🆘 **Usa** `/soporte` **si el problema persiste**"
+            "🆘 **Usa** `/help` **si el problema persiste**"
         )
 
 async def procesar_y_limpiar(cliente, mensaje, ruta_video, ruta_convertido, user_id):
@@ -1032,7 +941,7 @@ async def procesar_y_limpiar(cliente, mensaje, ruta_video, ruta_convertido, user
 
 # ==================== COMANDOS BÁSICOS ====================
 @app.on_message(filters.command("start"))
-@verificar_acceso
+@registrar_usuario
 async def comando_inicio(cliente: Client, mensaje: Message):
     estadisticas = sistema_colas.obtener_estadisticas()
     estadisticas_bot = db.obtener_estadisticas_generales()
@@ -1056,34 +965,66 @@ async def comando_inicio(cliente: Client, mensaje: Message):
     await mensaje.reply_text(texto)
 
 @app.on_message(filters.command("help"))
-@verificar_acceso
+@registrar_usuario
 async def comando_ayuda(cliente: Client, mensaje: Message):
     texto = (
-        "📚 **Centro de Ayuda**\n\n"
-        "🎯 **Comandos Disponibles:**\n"
-        "• `/start` - Iniciar el bot\n"
-        "• `/help` - Mostrar ayuda\n"
-        "• `/info` - Estado del sistema\n"
-        "• `/cola` - Ver cola actual\n"
-        "• `/historial` - Tu historial\n"
-        "• `/estadisticas` - Stats del bot\n"
-        "• `/soporte` - Reportar problema\n\n"
-        "🔄 **Proceso Simple:**\n"
-        "1. 📤 Envía el video\n"
-        "2. ⚙️ Procesamiento automático\n"
-        "3. 📥 Recibe el resultado\n\n"
-        "📊 **Barra de Progreso:**\n"
-        "• Progreso en tiempo real\n"
-        "• Tiempo estimado\n"
-        "• Estado actual\n\n"
-        "🆘 **Soporte:**\n"
-        "Usa `/soporte <mensaje>`\npara ayuda inmediata"
+        "📚 **CENTRO DE AYUDA - CONVERSOR DE VIDEOS** 🤖\n\n"
+        
+        "🎯 **DESCRIPCIÓN GENERAL**\n"
+        "Este bot convierte y comprime videos a formato MP4 con calidad optimizada. "
+        "Utiliza FFmpeg para procesamiento profesional y cuenta con un sistema inteligente "
+        "de colas para manejar múltiples solicitudes simultáneamente.\n\n"
+        
+        "🔄 **PROCESO DE CONVERSIÓN**\n"
+        "1. **📤 Envío**: Envía cualquier archivo de video (MP4, AVI, MKV, MOV, etc.)\n"
+        "2. **⚙️ Procesamiento**: El bot procesa automáticamente el video\n"
+        "3. **📊 Progreso**: Barra de progreso en tiempo real\n"
+        "4. **📥 Resultado**: Recibe el video convertido en MP4\n\n"
+        
+        "⚡ **SISTEMA DE COLAS**\n"
+        "• **Procesamiento simultáneo**: Múltiples videos a la vez\n"
+        "• **Posición en cola**: Conoce tu lugar en la fila\n"
+        "• **Estado en tiempo real**: Monitorea el progreso\n"
+        "• **Límite por usuario**: Un video a la vez por persona\n\n"
+        
+        "📊 **COMANDOS DISPONIBLES**\n"
+        "• `/start` - Iniciar el bot y ver información básica\n"
+        "• `/help` - Mostrar esta ayuda detallada\n"
+        "• `/info` - Estado completo del sistema y estadísticas\n"
+        "• `/cola` - Ver tu posición en la cola de procesamiento\n"
+        "• `/historial` - Tu historial de conversiones recientes\n"
+        "• `/calidad` - Configurar calidad (solo programadores)\n\n"
+        
+        "⚙️ **CONFIGURACIÓN ACTUAL**\n"
+        f"• **📏 Límite de archivo**: `{Config.MAX_FILE_SIZE_MB} MB`\n"
+        f"• **🖼️ Resolución**: `{Config.DEFAULT_QUALITY['resolution']}`\n"
+        f"• **🎯 Calidad CRF**: `{Config.DEFAULT_QUALITY['crf']}` (0-51, menor es mejor)\n"
+        f"• **🔊 Audio**: `{Config.DEFAULT_QUALITY['audio_bitrate']}`\n"
+        f"• **📺 FPS**: `{Config.DEFAULT_QUALITY['fps']}`\n\n"
+        
+        "💡 **CONSEJOS DE USO**\n"
+        "• **Formatos soportados**: MP4, AVI, MKV, MOV, WMV, FLV, WebM\n"
+        "• **Tamaño máximo**: Respeta el límite establecido\n"
+        "• **Calidad**: El bot optimiza automáticamente la relación calidad/tamaño\n"
+        "• **Tiempo de procesamiento**: Depende del tamaño y duración del video\n\n"
+        
+        "🔧 **PARA PROGRAMADORES**\n"
+        "• `/calidad` - Ajustar parámetros de conversión\n"
+        "• `/max` - Cambiar límite de tamaño de archivo\n\n"
+        
+        "🆘 **SOLUCIÓN DE PROBLEMAS**\n"
+        "• **Error de formato**: Verifica que sea un video válido\n"
+        "• **Archivo muy grande**: Reduce el tamaño o comprime antes\n"
+        "• **Procesamiento lento**: El sistema está ocupado, intenta más tarde\n"
+        "• **Error inesperado**: Reenvía el video o contacta al programador\n\n"
+        
+        "🎉 **¡Disfruta convirtiendo tus videos!** 🎬"
     )
     
     await mensaje.reply_text(texto)
 
 @app.on_message(filters.command("info"))
-@verificar_acceso
+@registrar_usuario
 async def comando_info(cliente: Client, mensaje: Message):
     try:
         uso_cpu = psutil.cpu_percent()
@@ -1092,41 +1033,50 @@ async def comando_info(cliente: Client, mensaje: Message):
         
         estadisticas = sistema_colas.obtener_estadisticas()
         estadisticas_bot = db.obtener_estadisticas_generales()
-        es_admin = mensaje.from_user.id in Config.ADMINISTRADORES
+        es_programador_user = es_programador(mensaje.from_user.id)
         
         texto_info = (
-            "📊 **Estado del Sistema**\n\n"
+            "📊 **ESTADO COMPLETO DEL SISTEMA**\n\n"
             
-            "👤 **INFORMACIÓN DE USUARIO:**\n"
-            f"• **Nombre:** {mensaje.from_user.first_name}\n"
-            f"• **ID:** `{mensaje.from_user.id}`\n"
-            f"• **Tipo:** {'👑 Administrador' if es_admin else '👤 Usuario'}\n\n"
+            "👤 **INFORMACIÓN DE USUARIO**\n"
+            f"• **Nombre**: {mensaje.from_user.first_name}\n"
+            f"• **ID**: `{mensaje.from_user.id}`\n"
+            f"• **Tipo**: {'👑 Programador' if es_programador_user else '👤 Usuario'}\n\n"
             
-            "🤖 **ESTADÍSTICAS DEL BOT:**\n"
-            f"• **Usuarios activos:** `{estadisticas_bot['total_usuarios']}`\n"
-            f"• **Grupos autorizados:** `{estadisticas_bot['total_grupos']}`\n"
-            f"• **Videos convertidos:** `{estadisticas_bot['total_videos']}`\n"
-            f"• **Espacio ahorrado:** `{formatear_tamano(estadisticas_bot['espacio_ahorrado'])}`\n"
-            f"• **Límite actual:** `{Config.MAX_FILE_SIZE_MB} MB`\n"
-            f"• **Procesos completados:** `{estadisticas['completados']}`\n"
-            f"• **Tiempo promedio:** `{formatear_tiempo(estadisticas['tiempo_promedio'])}`\n\n"
+            "🤖 **ESTADÍSTICAS GLOBALES DEL BOT**\n"
+            f"• **Usuarios registrados**: `{estadisticas_bot['total_usuarios']}`\n"
+            f"• **Videos convertidos**: `{estadisticas_bot['total_videos']}`\n"
+            f"• **Espacio ahorrado**: `{formatear_tamano(estadisticas_bot['espacio_ahorrado'])}`\n"
+            f"• **Tiempo total de procesamiento**: `{formatear_tiempo(estadisticas_bot['tiempo_total_procesamiento'])}`\n\n"
             
-            "⚡ **SISTEMA DE COLAS:**\n"
-            f"• **Procesando ahora:** `{estadisticas['procesando']}/{estadisticas['max_concurrente']}`\n"
-            f"• **En espera:** `{estadisticas['en_espera']}`\n"
-            f"• **Errores totales:** `{estadisticas['errores']}`\n\n"
+            "⚡ **SISTEMA DE COLAS - ESTADO ACTUAL**\n"
+            f"• **Procesando ahora**: `{estadisticas['procesando']}/{estadisticas['max_concurrente']}`\n"
+            f"• **En espera**: `{estadisticas['en_espera']}`\n"
+            f"• **Completados (sesión)**: `{estadisticas['completados']}`\n"
+            f"• **Errores (sesión)**: `{estadisticas['errores']}`\n"
+            f"• **Tiempo promedio**: `{formatear_tiempo(estadisticas['tiempo_promedio'])}`\n"
+            f"• **Uptime del sistema**: `{formatear_tiempo(estadisticas['uptime'])}`\n\n"
             
-            "⚙️ **CONFIGURACIÓN ACTUAL:**\n"
-            f"• **Resolución:** `{Config.DEFAULT_QUALITY['resolution']}`\n"
-            f"• **Calidad CRF:** `{Config.DEFAULT_QUALITY['crf']}`\n"
-            f"• **Audio:** `{Config.DEFAULT_QUALITY['audio_bitrate']}`\n"
-            f"• **FPS:** `{Config.DEFAULT_QUALITY['fps']}`\n\n"
+            "⚙️ **CONFIGURACIÓN ACTUAL DE CALIDAD**\n"
+            f"• **Resolución**: `{Config.DEFAULT_QUALITY['resolution']}`\n"
+            f"• **Calidad CRF**: `{Config.DEFAULT_QUALITY['crf']}` (0-51, menor es mejor)\n"
+            f"• **Bitrate de audio**: `{Config.DEFAULT_QUALITY['audio_bitrate']}`\n"
+            f"• **FPS**: `{Config.DEFAULT_QUALITY['fps']}`\n"
+            f"• **Preset**: `{Config.DEFAULT_QUALITY['preset']}`\n"
+            f"• **Codec de video**: `{Config.DEFAULT_QUALITY['codec']}`\n\n"
             
-            "🖥️ **ESTADO DEL SERVIDOR:**\n"
-            f"{obtener_emoji_estado(uso_cpu)} **CPU:** `{uso_cpu}%`\n"
-            f"{obtener_emoji_estado(memoria.percent)} **Memoria:** `{memoria.percent}%`\n"
-            f"{obtener_emoji_estado(disco.percent)} **Almacenamiento:** `{disco.percent}%`\n"
-            f"💾 **Libre:** `{formatear_tamano(disco.free)}`"
+            "📏 **LÍMITES DEL SISTEMA**\n"
+            f"• **Tamaño máximo por archivo**: `{Config.MAX_FILE_SIZE_MB} MB`\n"
+            f"• **Procesos concurrentes máximos**: `{Config.MAX_CONCURRENT_PROCESSES}`\n\n"
+            
+            "🖥️ **ESTADO DEL SERVIDOR**\n"
+            f"{obtener_emoji_estado(uso_cpu)} **Uso de CPU**: `{uso_cpu:.1f}%`\n"
+            f"{obtener_emoji_estado(memoria.percent)} **Uso de memoria**: `{memoria.percent:.1f}%`\n"
+            f"{obtener_emoji_estado(disco.percent)} **Uso de almacenamiento**: `{disco.percent:.1f}%`\n"
+            f"💾 **Espacio libre**: `{formatear_tamano(disco.free)}`\n\n"
+            
+            "🔍 **LEGENDAS DE ESTADO**\n"
+            "🟢 Normal 🟡 Moderado 🔴 Crítico"
         )
         
     except Exception as e:
@@ -1134,18 +1084,18 @@ async def comando_info(cliente: Client, mensaje: Message):
         estadisticas = sistema_colas.obtener_estadisticas()
         texto_info = (
             "📊 **Información del Sistema**\n\n"
-            f"👤 **Usuario:** {mensaje.from_user.first_name}\n"
-            f"📏 **Límite:** {Config.MAX_FILE_SIZE_MB}MB\n"
-            f"⚡ **Procesos:** {estadisticas['procesando']}/{estadisticas['max_concurrente']}\n"
-            f"📥 **En cola:** {estadisticas['en_espera']}\n"
-            f"✅ **Completados:** {estadisticas['completados']}\n\n"
+            f"👤 **Usuario**: {mensaje.from_user.first_name}\n"
+            f"📏 **Límite**: {Config.MAX_FILE_SIZE_MB}MB\n"
+            f"⚡ **Procesos**: {estadisticas['procesando']}/{estadisticas['max_concurrente']}\n"
+            f"📥 **En cola**: {estadisticas['en_espera']}\n"
+            f"✅ **Completados**: {estadisticas['completados']}\n\n"
             "🟢 **Sistema operativo**"
         )
     
     await mensaje.reply_text(texto_info)
 
 @app.on_message(filters.command("cola"))
-@verificar_acceso
+@registrar_usuario
 async def comando_cola(cliente: Client, mensaje: Message):
     estadisticas = sistema_colas.obtener_estadisticas()
     estado_usuario = sistema_colas.obtener_estado(mensaje.from_user.id)
@@ -1153,159 +1103,110 @@ async def comando_cola(cliente: Client, mensaje: Message):
     if estado_usuario == "procesando":
         emoji_estado = "⚡"
         texto_estado = "Procesando ahora"
+        tiempo_estimado = f"Tiempo estimado: `{formatear_tiempo(estadisticas['tiempo_promedio'])}`"
     elif estado_usuario.startswith("encolado"):
         posicion = estado_usuario.split('_')[1]
         emoji_estado = "📥"
         texto_estado = f"En cola (posición #{posicion})"
+        tiempo_estimado = f"Tiempo estimado: `{formatear_tiempo(int(posicion) * estadisticas['tiempo_promedio'])}`"
     else:
         emoji_estado = "✅"
         texto_estado = "Sin procesos activos"
+        tiempo_estimado = "Puedes enviar un video para comenzar"
     
     texto = (
-        "📊 **Estado de la Cola**\n\n"
-        f"{emoji_estado} **Tu estado:** {texto_estado}\n\n"
-        f"⚡ **Procesos activos:** `{estadisticas['procesando']}/{estadisticas['max_concurrente']}`\n"
-        f"📥 **En espera:** `{estadisticas['en_espera']}`\n"
-        f"✅ **Completados hoy:** `{estadisticas['completados']}`\n"
-        f"⏱️ **Tiempo promedio:** `{formatear_tiempo(estadisticas['tiempo_promedio'])}`\n\n"
-        "🔄 **El sistema procesa automáticamente**\n"
-        "los videos por orden de llegada."
+        "📊 **ESTADO DE LA COLA DE PROCESAMIENTO**\n\n"
+        f"{emoji_estado} **Tu estado**: {texto_estado}\n"
+        f"{tiempo_estimado}\n\n"
+        
+        "📈 **ESTADÍSTICAS DE LA COLA**\n"
+        f"• **Procesos activos**: `{estadisticas['procesando']}/{estadisticas['max_concurrente']}`\n"
+        f"• **Videos en espera**: `{estadisticas['en_espera']}`\n"
+        f"• **Completados en esta sesión**: `{estadisticas['completados']}`\n"
+        f"• **Tiempo promedio de procesamiento**: `{formatear_tiempo(estadisticas['tiempo_promedio'])}`\n\n"
+        
+        "💡 **INFORMACIÓN ADICIONAL**\n"
+        "• El sistema procesa videos por orden de llegada\n"
+        "• Solo puedes tener un video en proceso a la vez\n"
+        "• Los tiempos son estimados y pueden variar\n"
+        "• La calidad se optimiza automáticamente\n\n"
+        
+        "🚀 **¿Listo para convertir?**\n"
+        "¡Envía tu video y únete a la cola!"
     )
     
     await mensaje.reply_text(texto)
 
-# ==================== NUEVOS COMANDOS DE BASE DE DATOS ====================
 @app.on_message(filters.command("historial"))
-@verificar_acceso
+@registrar_usuario
 async def comando_historial(cliente: Client, mensaje: Message):
     user_id = mensaje.from_user.id
-    historial = db.obtener_historial_usuario(user_id, limite=5)
+    historial = db.obtener_historial_usuario(user_id, limite=10)
+    usuario = db.obtener_usuario(user_id)
     
     if not historial:
         await mensaje.reply_text(
-            "📝 **Historial de Conversiones**\n\n"
-            "📭 **Aún no has convertido videos**\n"
-            "Envía un video para comenzar!"
+            "📝 **HISTORIAL DE CONVERSIONES**\n\n"
+            "📭 **Aún no has convertido videos**\n\n"
+            "🚀 **Para comenzar:**\n"
+            "1. Envía cualquier video al bot\n"
+            "2. Espera el procesamiento automático\n"
+            "3. Recibe tu video convertido\n\n"
+            "🎯 **Formatos soportados:**\n"
+            "MP4, AVI, MKV, MOV, WMV, FLV, WebM\n\n"
+            "¡Tu historial aparecerá aquí después de tu primera conversión!"
         )
         return
     
-    texto = "📝 **Tus Últimas Conversiones**\n\n"
+    texto = f"📝 **HISTORIAL DE CONVERSIONES**\n\n"
+    texto += f"👤 **Usuario**: {mensaje.from_user.first_name}\n"
+    texto += f"📊 **Total de conversiones**: `{usuario['total_conversiones'] if usuario else len(historial)}`\n\n"
     
+    total_ahorro = 0
     for i, conversion in enumerate(historial, 1):
-        reduccion = ((conversion['tamano_original'] - conversion['tamano_convertido']) / conversion['tamano_original']) * 100 if conversion['tamano_original'] > 0 else 0
+        reduccion = conversion['tamano_original'] - conversion['tamano_convertido']
+        porcentaje = (reduccion / conversion['tamano_original']) * 100 if conversion['tamano_original'] > 0 else 0
+        total_ahorro += max(0, reduccion)
+        
         emoji = "📉" if reduccion > 0 else "📈" if reduccion < 0 else "⚖️"
         
         texto += (
-            f"**{i}. {conversion['nombre_archivo'][:20]}...**\n"
-            f"   📊 {formatear_tamano(conversion['tamano_original'])} → {formatear_tamano(conversion['tamano_convertido'])}\n"
-            f"   {emoji} {abs(reduccion):.1f}% - {conversion['fecha_conversion'][:16]}\n\n"
+            f"**{i}. {conversion['nombre_archivo'][:25]}...**\n"
+            f"   📊 **Tamaños**: `{formatear_tamano(conversion['tamano_original'])}` → `{formatear_tamano(conversion['tamano_convertido'])}`\n"
+            f"   {emoji} **Cambio**: `{abs(porcentaje):.1f}%` ({'+' if reduccion < 0 else '-'}{formatear_tamano(abs(reduccion))})\n"
+            f"   ⏱️ **Duración**: `{formatear_tiempo(conversion['tiempo_procesamiento'])}`\n"
+            f"   📅 **Fecha**: `{conversion['fecha_conversion'][:16]}`\n\n"
         )
+    
+    texto += f"💾 **Espacio total ahorrado**: `{formatear_tamano(total_ahorro)}`\n\n"
+    texto += "🔍 *Mostrando las 10 conversiones más recientes*"
     
     await mensaje.reply_text(texto)
 
-@app.on_message(filters.command("estadisticas"))
-@verificar_acceso
-async def comando_estadisticas(cliente: Client, mensaje: Message):
-    estadisticas = db.obtener_estadisticas_generales()
-    estadisticas_colas = sistema_colas.obtener_estadisticas()
-    
-    texto = (
-        "📈 **Estadísticas del Bot**\n\n"
-        "👥 **USUARIOS:**\n"
-        f"• **Total usuarios:** `{estadisticas['total_usuarios']}`\n"
-        f"• **Grupos activos:** `{estadisticas['total_grupos']}`\n\n"
-        
-        "🎬 **CONVERSIONES:**\n"
-        f"• **Videos convertidos:** `{estadisticas['total_videos']}`\n"
-        f"• **Espacio ahorrado:** `{formatear_tamano(estadisticas['espacio_ahorrado'])}`\n"
-        f"• **Procesos exitosos:** `{estadisticas_colas['completados']}`\n"
-        f"• **Errores:** `{estadisticas_colas['errores']}`\n\n"
-        
-        "⚡ **RENDIMIENTO:**\n"
-        f"• **Tiempo promedio:** `{formatear_tiempo(estadisticas_colas['tiempo_promedio'])}`\n"
-        f"• **Uptime:** `{formatear_tiempo(estadisticas_colas['uptime'])}`\n"
-        f"• **Eficiencia:** `{(estadisticas_colas['completados'] / (estadisticas_colas['completados'] + estadisticas_colas['errores']) * 100) if (estadisticas_colas['completados'] + estadisticas_colas['errores']) > 0 else 0:.1f}%`"
-    )
-    
-    await mensaje.reply_text(texto)
-
-# ==================== COMANDOS DE SOPORTE ====================
-@app.on_message(filters.command("soporte"))
-@verificar_acceso
-async def comando_soporte(cliente: Client, mensaje: Message):
-    texto = mensaje.text.split(" ", 1)
-    
-    if len(texto) < 2:
-        await mensaje.reply_text(
-            "🆘 **Centro de Soporte**\n\n"
-            "📝 **¿Necesitas ayuda?**\n\n"
-            "**Uso correcto:**\n"
-            "`/soporte <tu mensaje>`\n\n"
-            "**Ejemplos:**\n"
-            "• `/soporte El video no se convierte`\n"
-            "• `/soporte Error con archivo MP4`\n"
-            "• `/soporte La calidad es baja`\n\n"
-            "⏰ **Respuesta rápida garantizada**"
-        )
-        return
-    
-    problema = texto[1]
-    usuario = mensaje.from_user
-    
-    reporte = (
-        "🆘 **Nuevo Reporte de Soporte**\n\n"
-        f"👤 **Usuario:** {usuario.first_name}\n"
-        f"🆔 **ID:** `{usuario.id}`\n"
-        f"📅 **Hora:** {datetime.datetime.now().strftime('%H:%M')}\n\n"
-        f"📝 **Problema:**\n{problema}\n\n"
-        f"💬 **Mensaje original:**\n`{mensaje.text}`"
-    )
-    
-    enviado = False
-    for admin_id in Config.ADMINISTRADORES:
-        try:
-            await cliente.send_message(admin_id, reporte)
-            enviado = True
-        except Exception:
-            continue
-    
-    if enviado:
-        await mensaje.reply_text(
-            "✅ **Reporte Enviado**\n\n"
-            "📞 **Tu solicitud ha sido recibida**\n"
-            "• Administradores notificados\n"
-            "• Respuesta pronto\n"
-            "• Ticket generado\n\n"
-            "⏰ **Gracias por tu paciencia**"
-        )
-    else:
-        await mensaje.reply_text(
-            "❌ **Error al Enviar**\n\n"
-            "No se pudo enviar tu reporte.\n"
-            "Intenta nuevamente más tarde."
-        )
-
-# ==================== COMANDOS DE ADMINISTRADOR ====================
+# ==================== COMANDOS DE PROGRAMADOR ====================
 @app.on_message(filters.command("max"))
-@verificar_acceso
+@registrar_usuario
 async def comando_max(cliente: Client, mensaje: Message):
-    if mensaje.from_user.id not in Config.ADMINISTRADORES:
-        await mensaje.reply_text("🚫 **Solo administradores**")
+    if not es_programador(mensaje.from_user.id):
+        await mensaje.reply_text("🚫 **Comando solo para programadores**")
         return
     
     texto = mensaje.text.split()
     
     if len(texto) != 2:
         await mensaje.reply_text(
-            "📏 **Gestión de Límites**\n\n"
-            f"⚖️ **Límite actual:** `{Config.MAX_FILE_SIZE_MB} MB`\n\n"
-            "🔄 **Para modificar:**\n"
+            "📏 **GESTIÓN DE LÍMITES - PROGRAMADOR**\n\n"
+            f"⚖️ **Límite actual**: `{Config.MAX_FILE_SIZE_MB} MB`\n\n"
+            "🔄 **PARA MODIFICAR:**\n"
             "`/max <nuevo_límite_en_MB>`\n\n"
-            "💡 **Ejemplos:**\n"
-            "• `/max 500` - 500 MB\n"
-            "• `/max 100` - 100 MB\n"
-            "• `/max 2000` - 2 GB\n\n"
-            "⚠️ **Límites:** 10MB - 5000MB"
+            "💡 **EJEMPLOS:**\n"
+            "• `/max 500` - Establece 500 MB\n"
+            "• `/max 100` - Establece 100 MB\n"
+            "• `/max 2000` - Establece 2 GB\n\n"
+            "⚠️ **LÍMITES PERMITIDOS:**\n"
+            "• **Mínimo**: 10 MB\n"
+            "• **Máximo**: 5000 MB\n\n"
+            "🔧 **Este cambio afecta a todos los usuarios**"
         )
         return
     
@@ -1313,60 +1214,77 @@ async def comando_max(cliente: Client, mensaje: Message):
         nuevo_limite = int(texto[1])
         
         if nuevo_limite < 10:
-            await mensaje.reply_text("❌ **Mínimo 10MB**")
+            await mensaje.reply_text("❌ **Error**: El mínimo permitido es 10 MB")
             return
             
         if nuevo_limite > 5000:
-            await mensaje.reply_text("❌ **Máximo 5000MB**")
+            await mensaje.reply_text("❌ **Error**: El máximo permitido es 5000 MB")
             return
         
-        db.actualizar_configuracion('limite_peso_mb', str(nuevo_limite))
-        
-        await mensaje.reply_text(
-            "✅ **Límite Actualizado**\n\n"
-            f"📊 **Cambios realizados:**\n"
-            f"• **Antes:** `{Config.MAX_FILE_SIZE_MB} MB`\n"
-            f"• **Ahora:** `{nuevo_limite} MB`\n\n"
-            f"👥 **Afecta a todos los usuarios**\n"
-            f"🎯 **Aplicable inmediatamente**"
-        )
+        # Actualizar en base de datos y memoria
+        if db.actualizar_configuracion('limite_peso_mb', str(nuevo_limite)):
+            Config.MAX_FILE_SIZE_MB = nuevo_limite
+            await mensaje.reply_text(
+                "✅ **LÍMITE ACTUALIZADO EXITOSAMENTE**\n\n"
+                f"📊 **Cambios realizados:**\n"
+                f"• **Límite anterior**: `{Config.MAX_FILE_SIZE_MB} MB`\n"
+                f"• **Nuevo límite**: `{nuevo_limite} MB`\n\n"
+                f"👥 **Alcance**: Todos los usuarios\n"
+                f"🎯 **Estado**: Aplicado inmediatamente\n"
+                f"💾 **Persistencia**: Guardado en base de datos\n\n"
+                f"🔄 **El cambio está activo y funcionando**"
+            )
+        else:
+            await mensaje.reply_text("❌ **Error**: No se pudo actualizar el límite en la base de datos")
         
     except ValueError:
         await mensaje.reply_text(
-            "❌ **Error de Formato**\n\n"
-            "El límite debe ser un número.\n\n"
+            "❌ **ERROR DE FORMATO**\n\n"
+            "El límite debe ser un número entero.\n\n"
             "📝 **Ejemplo correcto:**\n"
-            "`/max 500`"
+            "`/max 500`\n\n"
+            "🔢 **Solo se permiten números sin decimales**"
         )
 
 @app.on_message(filters.command("calidad"))
-@verificar_acceso
+@registrar_usuario
 async def comando_calidad(cliente: Client, mensaje: Message):
-    if mensaje.from_user.id not in Config.ADMINISTRADORES:
-        await mensaje.reply_text("🚫 **Solo administradores**")
+    if not es_programador(mensaje.from_user.id):
+        await mensaje.reply_text("🚫 **Comando solo para programadores**")
         return
     
     texto = mensaje.text.split()
     
     if len(texto) == 1:
         await mensaje.reply_text(
-            f"⚙️ **Calidad Actual**\n\n"
-            f"🖼️ **Resolución:** `{Config.DEFAULT_QUALITY['resolution']}`\n"
-            f"🎯 **CRF:** `{Config.DEFAULT_QUALITY['crf']}` (0-51, menor es mejor)\n"
-            f"🔊 **Audio:** `{Config.DEFAULT_QUALITY['audio_bitrate']}`\n"
-            f"📺 **FPS:** `{Config.DEFAULT_QUALITY['fps']}`\n"
-            f"⚡ **Preset:** `{Config.DEFAULT_QUALITY['preset']}`\n"
-            f"🔧 **Codec:** `{Config.DEFAULT_QUALITY['codec']}`\n\n"
-            "🔄 **Para modificar:**\n"
-            "`/calidad parametro=valor`\n\n"
-            "💡 **Ejemplo:**\n"
-            "`/calidad resolution=1920x1080 crf=18`"
+            f"⚙️ **CONFIGURACIÓN DE CALIDAD - PROGRAMADOR**\n\n"
+            f"🖼️ **Resolución actual**: `{Config.DEFAULT_QUALITY['resolution']}`\n"
+            f"🎯 **CRF actual**: `{Config.DEFAULT_QUALITY['crf']}` (0-51, menor es mejor)\n"
+            f"🔊 **Audio actual**: `{Config.DEFAULT_QUALITY['audio_bitrate']}`\n"
+            f"📺 **FPS actual**: `{Config.DEFAULT_QUALITY['fps']}`\n"
+            f"⚡ **Preset actual**: `{Config.DEFAULT_QUALITY['preset']}`\n"
+            f"🔧 **Codec actual**: `{Config.DEFAULT_QUALITY['codec']}`\n\n"
+            "🔄 **PARA MODIFICAR:**\n"
+            "`/calidad parametro=valor parametro2=valor2`\n\n"
+            "💡 **EJEMPLOS:**\n"
+            "• `/calidad resolution=1920x1080 crf=18`\n"
+            "• `/calidad audio_bitrate=192k fps=24`\n"
+            "• `/calidad preset=fast codec=libx265`\n\n"
+            "📋 **PARÁMETROS DISPONIBLES:**\n"
+            "• `resolution` - Ej: 1280x720, 1920x1080\n"
+            "• `crf` - Calidad (0-51, 23 por defecto)\n"
+            "• `audio_bitrate` - Ej: 128k, 192k, 256k\n"
+            "• `fps` - Cuadros por segundo\n"
+            "• `preset` - ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow\n"
+            "• `codec` - libx264, libx265\n\n"
+            "⚠️ **Los cambios afectan a todos los usuarios**"
         )
         return
     
     try:
         parametros = " ".join(texto[1:]).split()
         cambios = []
+        parametros_validos = []
         
         for param in parametros:
             if '=' in param:
@@ -1374,82 +1292,40 @@ async def comando_calidad(cliente: Client, mensaje: Message):
                 if key in Config.DEFAULT_QUALITY:
                     valor_anterior = Config.DEFAULT_QUALITY[key]
                     Config.DEFAULT_QUALITY[key] = value
-                    cambios.append(f"• **{key}:** `{valor_anterior}` → `{value}`")
+                    cambios.append(f"• **{key}**: `{valor_anterior}` → `{value}`")
+                    parametros_validos.append(key)
         
         if cambios:
-            db.actualizar_configuracion('calidad_default', json.dumps(Config.DEFAULT_QUALITY))
-            respuesta = "✅ **Configuración Actualizada**\n\n" + "\n".join(cambios)
+            # Actualizar en base de datos
+            if db.actualizar_configuracion('calidad_default', json.dumps(Config.DEFAULT_QUALITY)):
+                respuesta = (
+                    "✅ **CONFIGURACIÓN ACTUALIZADA EXITOSAMENTE**\n\n"
+                    "📊 **Cambios realizados:**\n" + "\n".join(cambios) + "\n\n"
+                    f"👥 **Alcance**: Todos los usuarios\n"
+                    f"🎯 **Estado**: Aplicado inmediatamente\n"
+                    f"💾 **Persistencia**: Guardado en base de datos\n\n"
+                    f"🔄 **La nueva configuración está activa**"
+                )
+            else:
+                respuesta = "❌ **Error**: No se pudo guardar la configuración en la base de datos"
         else:
-            respuesta = "❌ **Sin cambios**\nNo se encontraron parámetros válidos."
+            respuesta = (
+                "❌ **SIN CAMBIOS VÁLIDOS**\n\n"
+                "No se encontraron parámetros válidos para modificar.\n\n"
+                "📋 **Parámetros aceptados:**\n"
+                "`resolution`, `crf`, `audio_bitrate`, `fps`, `preset`, `codec`\n\n"
+                "💡 **Ejemplo correcto:**\n"
+                "`/calidad resolution=1920x1080 crf=18`"
+            )
         
         await mensaje.reply_text(respuesta)
         
     except Exception as e:
-        await mensaje.reply_text(f"❌ **Error**\n`{str(e)}`")
-
-@app.on_message(filters.command("add"))
-@verificar_acceso
-async def comando_add(cliente: Client, mensaje: Message):
-    if mensaje.from_user.id not in Config.ADMINISTRADORES:
-        await mensaje.reply_text("🚫 **Solo administradores**")
-        return
-    
-    texto = mensaje.text.split()
-    
-    if len(texto) != 2:
         await mensaje.reply_text(
-            "👥 **Agregar Usuario**\n\n"
-            "**Uso:** `/add @usuario`\n"
-            "**Ejemplo:** `/add @nombreusuario`\n\n"
-            "📝 **También puedes usar ID:**\n"
-            "`/add 123456789`"
+            f"❌ **ERROR EN LA CONFIGURACIÓN**\n\n"
+            f"**Detalles del error:**\n`{str(e)}`\n\n"
+            "🆘 **Verifica la sintaxis y vuelve a intentar**"
         )
-        return
-    
-    objetivo = texto[1]
-    
-    try:
-        if objetivo.startswith('@'):
-            user = await cliente.get_users(objetivo)
-        else:
-            user = await cliente.get_users(int(objetivo))
-        
-        db.agregar_actualizar_usuario({
-            'user_id': user.id,
-            'username': user.username,
-            'first_name': user.first_name,
-            'last_name': user.last_name
-        })
-        
-        await mensaje.reply_text(f"✅ **{user.first_name} agregado**")
-        
-    except Exception as e:
-        await mensaje.reply_text(f"❌ **Error**\n`{str(e)}`")
-
-@app.on_message(filters.command("usuarios"))
-@verificar_acceso
-async def comando_usuarios(cliente: Client, mensaje: Message):
-    if mensaje.from_user.id not in Config.ADMINISTRADORES:
-        await mensaje.reply_text("🚫 **Solo administradores**")
-        return
-    
-    usuarios_activos = db.obtener_usuarios_activos()
-    
-    if not usuarios_activos:
-        await mensaje.reply_text("👥 **Lista vacía**")
-        return
-    
-    texto = "👥 **Usuarios Permitidos**\n\n"
-    for i, user_id in enumerate(list(usuarios_activos)[:15], 1):
-        try:
-            user = await cliente.get_users(user_id)
-            texto += f"• {user.first_name} - `{user_id}`\n"
-        except:
-            texto += f"• `{user_id}`\n"
-    
-    texto += f"\n**Total:** {len(usuarios_activos)}"
-    
-    await mensaje.reply_text(texto)
 
 # ==================== INICIALIZACIÓN ====================
 def inicializar_sistema():
@@ -1460,14 +1336,18 @@ def inicializar_sistema():
         logger.error(f"❌ Error de configuración: {e}")
         raise
     
+    # Cargar configuración desde base de datos
+    db.cargar_configuracion_desde_db()
+    
     # Crear directorio temporal si no existe
     os.makedirs(Config.TEMP_DIR, exist_ok=True)
     
     logger.info("🎬 Bot de Conversión de Videos - INICIADO")
-    logger.info(f"👑 Administradores: {len(Config.ADMINISTRADORES)}")
+    logger.info(f"👑 Programadores: {len(Config.PROGRAMADORES)}")
     logger.info(f"📏 Límite de peso: {Config.MAX_FILE_SIZE_MB}MB")
     logger.info(f"⚡ Procesos concurrentes: {Config.MAX_CONCURRENT_PROCESSES}")
-    logger.info("🗄️ Base de datos inicializada")
+    logger.info(f"🖼️ Calidad: {Config.DEFAULT_QUALITY['resolution']} CRF{Config.DEFAULT_QUALITY['crf']}")
+    logger.info("🗄️ Base de datos inicializada y configurada")
     logger.info("🟢 Sistema listo y operativo")
 
 if __name__ == "__main__":
